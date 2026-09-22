@@ -1,0 +1,200 @@
+"""
+Toolchain for Node.js projects, including tests with Node's own test runner.
+"""
+type Nodejs {
+  """
+  The source directory for the project.
+  """
+  pub source: Directory! @defaultPath(path: "/") @ignorePatterns(patterns: ["**/node_modules", "/dist", "/build"])
+
+  """
+  The base image to use.
+  """
+  pub baseImageAddress: String! = "node:25-alpine"
+
+  """
+  The package manager to use.
+  """
+  pub packageManager: String! = "npm"
+
+  """
+  Path patterns that never hold a project worth testing.
+  """
+  let ignore: [String!]! = ["**/node_modules/**", "**/dist/**", "**/build/**"]
+
+  """
+  Matches a package.json whose test script invokes Node's test runner.
+  Rust regex, as the workspace search expects.
+  """
+  let testScriptPattern: String! = """"test"\s*:\s*"[^"]*\bnode\b[^"]*\s--test\b"""
+
+  """
+  The projects whose tests run on Node's own test runner.
+
+  There is no config file to look for. node:test is part of the standard
+  library and is configured by flags, so it leaves nothing on disk. The
+  `node.config.json` that does exist is still experimental, is not read
+  without a flag, and is almost never present, so its absence proves
+  nothing.
+
+  package.json marks every npm package rather than a node:test project, so
+  the marker has to be its content: a test script that actually runs
+  `node --test`. That is also the honest signal, because it is the command
+  CI has to run.
+
+  Roots come from findRoots so that a dependency's own package.json cannot
+  be mistaken for a project. Grepping alone does not hold: searching this
+  very repository turned up a match inside node_modules.
+  """
+  pub projects(ws: Workspace!): [String!]! {
+    let hits = ws.search(
+      pattern: testScriptPattern,
+      globs: ["**/package.json"],
+      filesOnly: true,
+    ).{{filePath}}.map { r => r.filePath }
+
+    ws.findRoots(markers: ["package.json"], exclude: ignore).reduce([]) { acc, dir =>
+      let manifest = dir + "/package.json"
+      if (dir == ".") {
+        manifest = "package.json"
+      }
+
+      let keep: [String!]! = []
+      if (hits.contains(manifest)) {
+        keep = [dir]
+      }
+
+      acc + keep
+    }
+  }
+
+  """
+  Run the tests of every project visible from the client's cwd.
+  """
+  pub testAll(
+    ws: Workspace!,
+    """
+    Extra flags to pass to the test script
+    """
+    flags: [String!]! = [],
+  ): Void @check {
+    projects(ws).each { path =>
+      test(ws, path: path, flags: flags)
+    }
+
+    null
+  }
+
+  """
+  Run the tests of a single project.
+
+  Runs the project's own test script rather than a reconstructed command
+  line. The script is what the project means by "test", and reproducing its
+  flags here would only drift from it.
+  """
+  pub test(
+    ws: Workspace!,
+    """
+    Path of the project to test, relative to the client's cwd
+    """
+    path: String! = ".",
+    """
+    Extra flags to pass to the test script
+    """
+    flags: [String!]! = [],
+  ): Void {
+    let run = [packageManager, "run", "test"]
+    if (flags != []) {
+      run = run + ["--"] + flags
+    }
+
+    baseFrom(projectSource(ws, path: path))
+      .withExec(run)
+      .sync
+
+    null
+  }
+
+  """
+  The source directory of a project, relative to the client's cwd.
+  """
+  pub projectSource(
+    ws: Workspace!,
+    """
+    Path of the project, relative to the client's cwd
+    """
+    path: String! = ".",
+  ): Directory! {
+    ws.directory(path, exclude: ["**/node_modules", "dist", "build"])
+  }
+
+  """
+  Install all required packages
+  """
+  pub withInstallAll(ctr: Container!): Container! {
+    ctr.withExec([packageManager, "install"])
+  }
+
+  """
+  Install a specific package
+  """
+  pub withInstallPackage(ctr: Container!, package: String!): Container! {
+    let installPackage = [packageManager, "install", package]
+    # yarn uses add instead of install
+    if (packageManager == "yarn") {
+      installPackage = [packageManager, "add", package]
+    }
+
+    ctr.withExec(installPackage)
+  }
+
+  """
+  Install a local package from a Directory
+  """
+  pub withInstallLocalPackage(ctr: Container!, package: Directory!): Container! {
+    let name = "/" + package.digest
+    # install the local package
+    let installPackage = [packageManager, "install", "-D", name]
+    # yarn uses add instead of install
+    if (packageManager == "yarn") {
+      installPackage = [packageManager, "add", "--dev", name]
+    }
+
+    # pnpm needs -w
+    if (packageManager == "pnpm") {
+      installPackage = [packageManager, "install", "-w", "-D", name]
+    }
+
+    ctr.withMountedDirectory(name, package).withExec(installPackage)
+  }
+
+  """
+  Runtime container for node, built from the module's source directory
+  """
+  pub base: Container! {
+    baseFrom(source)
+  }
+
+  """
+  Runtime container for node, built from any directory
+  """
+  pub baseFrom(src: Directory!): Container! {
+    # set cache variables for all supported package managers
+    let base = container.from(baseImageAddress).
+      withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages")).
+      withEnvVariable("npm_config_cache", "/root/.packages").
+      withEnvVariable("YARN_CACHE_FOLDER", "/root/.packages").
+      withEnvVariable("PNPM_HOME", "/root/.packages").
+      withEnvVariable("BUN_INSTALL_CACHE_DIR", "/root/.packages")
+
+    if (packageManager == "pnpm" and baseImageAddress.contains("node:")) {
+      base = base.withExec(["corepack", "enable"])
+    }
+
+    base.
+      withDirectory("/src", src).
+      withWorkdir("/src").
+      withEnvVariable("CI", "true").
+      withExec([packageManager, "install"])
+  }
+}
