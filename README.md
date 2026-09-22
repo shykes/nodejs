@@ -104,3 +104,41 @@ package.json is content rather than a filename.
 Pruning happens in the function rather than in the query: `!` negation in
 `globs` is not honoured by `Workspace.search`, and `skipIgnored` did not
 exclude `node_modules` either.
+
+## Tracing
+
+Each test gets its own span, so a run shows up in Dagger Cloud as a tree
+rather than a wall of stdout. Failures carry the error and mark the span,
+and stdout and stderr become logs attached to the file they came from.
+
+jest and vitest each ship a library that hooks their runner from outside,
+with import-in-the-middle, because neither exposes a run as data. node:test
+does: a reporter is an async generator over the event stream. So `lib/` is a
+plain consumer of a public API, with nothing patched and no build step.
+
+Node accepts `--test-reporter` inside `NODE_OPTIONS`, which is how jest gets
+its `--import` in too. That is what lets the project's own test script stay
+untouched:
+
+```
+NODE_OPTIONS=$NODE_OPTIONS
+  --test-reporter=spec --test-reporter-destination=stdout
+  --test-reporter=@dagger.io/node-test/reporter --test-reporter-destination=stdout
+```
+
+Two reporters, so the human output survives alongside the spans.
+
+The engine injects `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `TRACEPARENT`
+into every exec, so the spans parent under the run with no configuration.
+
+`lib/` vendors its dependencies rather than bundling them. Node resolves an
+installed local package from its real path, not through the symlink, so the
+mounted directory has to carry its own `node_modules`. jest and vitest solve
+the same problem with rollup; installing once needs no build tooling.
+
+A passing run is not cached. The point of the run is the spans, and a cache
+hit emits none.
+
+```sh
+dagger -m . call test-output    # the run, with each span echoed
+```

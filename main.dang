@@ -138,12 +138,69 @@ type Nodejs {
       run = run + ["--"] + flags
     }
 
-    baseFrom(projectSource(ws, path: path))
+    # Both reporters, so the human output survives alongside the spans.
+    # --test-reporter is accepted inside NODE_OPTIONS, which is what keeps
+    # the project's own test script untouched.
+    let opts = "$NODE_OPTIONS" +
+      " --test-reporter=spec --test-reporter-destination=stdout" +
+      " --test-reporter=@dagger.io/node-test/reporter --test-reporter-destination=stdout"
+
+    let runtime = baseFrom(projectSource(ws, path: path))
+
+    withInstallLocalPackage(runtime, reporterPackage)
+      .withEnvVariable("NODE_OPTIONS", opts, expand: true)
+      # A passing test run is not worth reusing: the point is the spans, and
+      # a cache hit emits none. jest does the same.
+      .withEnvVariable("DAGGER_NODE_TEST_NONCE", UUID.v7)
       .withExec(run)
       .sync
 
     null
   }
+
+  """
+  The OpenTelemetry reporter, installed into the runtime so each test gets a
+  span.
+
+  jest and vitest each ship a library that hooks their runner from the
+  outside, with import-in-the-middle, because neither exposes a run as data.
+  node:test does: a reporter is an async generator over the event stream.
+  So this is a plain consumer of a public API, with nothing patched, and it
+  needs no build step.
+  """
+  let reporterPackage: Directory! {
+    # Vendored, not bundled. Node resolves an installed local package from
+    # its real path rather than the symlink, so the mounted directory has to
+    # carry its own node_modules. jest and vitest solve this by bundling with
+    # rollup; installing once here needs no build tooling.
+    container
+      .from(baseImageAddress)
+      .withMountedCache("/root/.packages", cacheVolume("node-toolchain-packages"))
+      .withEnvVariable("npm_config_cache", "/root/.packages")
+      .withDirectory("/lib", currentModule.source.directory("lib"))
+      .withWorkdir("/lib")
+      .withExec(["npm", "install", "--omit=dev"])
+      .directory("/lib")
+  }
+
+  """
+  The raw output of a test run, with the reporter's own spans echoed.
+
+  Only for checking the reporters. `testAll` is what CI runs.
+  """
+  pub testOutput(ws: Workspace!, path: String! = "."): String! {
+    let opts = "$NODE_OPTIONS" +
+      " --test-reporter=spec --test-reporter-destination=stdout" +
+      " --test-reporter=@dagger.io/node-test/reporter --test-reporter-destination=stdout"
+
+    withInstallLocalPackage(baseFrom(projectSource(ws, path: path)), reporterPackage)
+      .withEnvVariable("NODE_OPTIONS", opts, expand: true)
+      .withEnvVariable("DAGGER_NODE_TEST_NONCE", UUID.v7)
+      .withEnvVariable("DAGGER_NODE_TEST_DEBUG", "1")
+      .withExec([packageManager, "run", "test"])
+      .stdout
+  }
+
 
   """
   The source directory of a project, relative to the client's cwd.
