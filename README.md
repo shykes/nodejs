@@ -82,44 +82,25 @@ This fork is named `nodejs` for the same reason.
 `dagger functions` reports "No functions found". `type Nodejs` works. A
 mismatch should be an error, not an empty schema.
 
-## Registry entry
+## Recommending the module
 
-For `internal/cmd/dagger/modules.go`, alongside jest and vitest. It needs a
-content predicate rather than `SimpleRecommend`, for the reason above.
-`mochajs` already establishes the pattern with `hasMochaProperty`.
+`recommend(ws)` returns the paths that suggest installing this module: every
+package.json whose test script invokes the runner. It mirrors the shape the
+engine's own module recommendations use, where each entry returns the
+workspace paths that suggest it.
 
-```go
-{
-    Name:        "node",
-    Description: "Run JavaScript and TypeScript tests with Node's built-in test runner",
-    Repo:        "dagger.io/js/node",
-    Recommend: func(ctx context.Context, ws *core.Workspace) ([]string, error) {
-        return recommendConfigFiles(ctx, ws, "**/package.json", hasNodeTestScript)
-    },
-},
+```sh
+dagger -m . call recommend     # package.json
 ```
 
-```go
-// nodeTestScript matches a test script that invokes Node's own test runner:
-// "node --test", with any flags in between. node:test has no config file, so
-// the script is the only marker.
-var nodeTestScript = regexp.MustCompile(`(^|&&|\|\||;)\s*node\b[^&|;]*\s--test\b`)
+It has no special meaning to Dagger today. It is here so the detection logic
+lives with the module it detects, rather than in a table inside the engine.
+Most entries in that table are a glob over a config filename, which cannot
+work here; `mochajs` already needs the same treatment, since a `mocha` key in
+package.json is content rather than a filename.
 
-func hasNodeTestScript(contents string) bool {
-    var pkg struct {
-        Scripts map[string]string `json:"scripts"`
-    }
-    if err := json.Unmarshal([]byte(contents), &pkg); err != nil {
-        return false
-    }
-    for _, script := range pkg.Scripts {
-        if nodeTestScript.MatchString(script) {
-            return true
-        }
-    }
-    return false
-}
-```
+`projects` is built on it, so the match is defined once.
 
-Reading `scripts` rather than the whole file avoids matching `--test` in a
-dependency name, a description, or an unrelated field.
+Pruning happens in the function rather than in the query: `!` negation in
+`globs` is not honoured by `Workspace.search`, and `skipIgnored` did not
+exclude `node_modules` either.

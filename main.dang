@@ -47,11 +47,7 @@ type Nodejs {
   very repository turned up a match inside node_modules.
   """
   pub projects(ws: Workspace!): [String!]! {
-    let hits = ws.search(
-      pattern: testScriptPattern,
-      globs: ["**/package.json"],
-      filesOnly: true,
-    ).{{filePath}}.map { r => r.filePath }
+    let hits = recommend(ws)
 
     ws.findRoots(markers: ["package.json"], exclude: ignore).reduce([]) { acc, dir =>
       let manifest = dir + "/package.json"
@@ -62,6 +58,40 @@ type Nodejs {
       let keep: [String!]! = []
       if (hits.contains(manifest)) {
         keep = [dir]
+      }
+
+      acc + keep
+    }
+  }
+
+  """
+  Paths that recommend installing this module: every package.json whose test
+  script invokes Node's test runner.
+
+  This mirrors the shape of the engine's own module recommendations, where
+  each registry entry returns the workspace paths that suggest it. It has no
+  special meaning to Dagger yet. It is here so the detection logic lives with
+  the module it detects, rather than in a table inside the engine.
+
+  Most entries there are a glob over a config filename. node:test has no
+  config file, so this one is a content match. `mochajs` already needs the
+  same treatment, since a `mocha` key in package.json is also content.
+  """
+  pub recommend(ws: Workspace!): [String!]! {
+    ws.search(
+      pattern: testScriptPattern,
+      globs: ["**/package.json"],
+      filesOnly: true,
+    ).{{filePath}}.map { r => r.filePath }.reduce([]) { acc, path =>
+      # Glob negation is not honoured by the search, and skipIgnored did not
+      # exclude node_modules either, so the pruning happens here.
+      let keep: [String!]! = [path]
+      if (path.contains("node_modules/")
+          or path.contains("dist/")
+          or path.contains("build/")
+          or path.contains("vendor/")
+          or path.contains("target/")) {
+        keep = []
       }
 
       acc + keep
